@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.env/
+venv*/
+ENV/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Session files
+*.session
+*.session-journal
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+
+# Local development
+.DS_Store
+Thumbs.db
+
+# Build/compiled files
+build/
+dist/
+*.egg-info/
