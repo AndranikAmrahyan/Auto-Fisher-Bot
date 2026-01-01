@@ -51,9 +51,9 @@ CMD_STOPS = {"закончить", "завершить", "остановить",
 
 FISH_CMD = "рыбалка"
 
-# Tunables (берём из env с дефолтами, для Render лучше увеличить таймауты)
-FIND_EMOJI_TIMEOUT = 60.0
-BOT_RESPONSE_TIMEOUT = 60.0
+# Tunables
+FIND_EMOJI_TIMEOUT = 35.0
+BOT_RESPONSE_TIMEOUT = 35.0
 
 # Cooldowns
 COOLDOWN_AFTER_CLICK = 3.5
@@ -80,8 +80,7 @@ def ping():
 def run_web_server():
     # Render предоставляет порт через переменную окружения PORT
     port = int(os.environ.get("PORT", 8080))
-    # Отключаем reloader, чтобы не запускалось несколько процессов на Render
-    app_flask.run(host="0.0.0.0", port=port, use_reloader=False)
+    app_flask.run(host="0.0.0.0", port=port)
 
 async def self_ping():
     """Периодически пингует сам себя, чтобы Render не усыплял сервис."""
@@ -109,8 +108,7 @@ client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 _worker_task = None
 _worker_running = False
-# Инициализируем _stop_event позже внутри main(), чтобы он был привязан к правильному loop
-_stop_event = None
+_stop_event = asyncio.Event()
 
 bot_msg_queue: asyncio.Queue = asyncio.Queue(maxsize=64)
 
@@ -198,27 +196,20 @@ def msg_text_lower(message) -> str:
         return ""
 
 async def click_button_by_flat_index(message, flat_index: int) -> bool:
-    MAX_ATTEMPTS = 4
+    MAX_ATTEMPTS = 3
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             mid = getattr(message, "id", None)
-            # Обновляем объект сообщения перед каждой попыткой
             if mid:
                 try:
                     fresh = await client.get_messages(QALAIS_BOT_ID, ids=mid)
-                    if fresh:
-                        message = fresh
-                except Exception:
-                    pass
+                    if fresh: message = fresh
+                except Exception: pass
 
-            # попытка click по flat index
             try:
-                logger.debug(f"Attempt {attempt}: clicking flat_index={flat_index} on message id={getattr(message,'id',None)}")
                 await message.click(flat_index)
-                logger.info(f"click_button: click by flat_index succeeded (attempt {attempt})")
                 return True
-            except Exception as e:
-                logger.debug(f"click flat_index failed (attempt {attempt}): {e}")
+            except Exception: pass
 
             # try row/col fallback
             try:
@@ -226,39 +217,23 @@ async def click_button_by_flat_index(message, flat_index: int) -> bool:
                 for ri, row in enumerate(getattr(message, "buttons", [])):
                     if flat_index < cum + len(row):
                         ci = flat_index - cum
-                        try:
-                            await message.click((ri, ci))
-                            logger.info(f"click_button: click by (row,col)=({ri},{ci}) succeeded")
-                            return True
-                        except Exception as e:
-                            logger.debug(f"click (row,col) failed: {e}")
+                        await message.click((ri, ci))
+                        return True
                     cum += len(row)
-            except Exception as e:
-                logger.debug("row/col fallback error: %s", e)
-
-            # fallback send text (более гибкое сравнение, убираем нулевые/спецсимволы)
+            except Exception: pass
+            
+            # fallback send text
             try:
                 flat_buttons = []
                 for row in getattr(message, "buttons", []):
-                    for b in row:
-                        txt = getattr(b, "text", "") or ""
-                        # нормализация: убираем нулевые пробелы и невидимые символы
-                        normalized = txt.replace("\u2800", "").replace("\u00A0", " ").strip()
-                        flat_buttons.append((txt, normalized))
-                if 0 <= flat_index < len(flat_buttons):
-                    original, normalized = flat_buttons[flat_index]
-                    send_text = normalized or original
-                    if send_text:
-                        logger.debug(f"click_button fallback: sending text '{send_text}'")
-                        await client.send_message(message.chat_id, send_text, reply_to=message.id)
-                        return True
-            except Exception as e:
-                logger.debug("fallback send text failed: %s", e)
-
-        except Exception as e:
-            logger.debug("Unexpected error in click_button loop: %s", e)
-        await asyncio.sleep(0.25 * attempt)  # увеличиваем задержку при повторных попытках
-    logger.warning("click_button_by_flat_index: all attempts failed for flat_index=%s message_id=%s", flat_index, getattr(message, "id", None))
+                    for b in row: flat_buttons.append(getattr(b, "text", "") or "")
+                if 0 <= flat_index < len(flat_buttons) and flat_buttons[flat_index]:
+                    await client.send_message(message.chat_id, flat_buttons[flat_index], reply_to=message.id)
+                    return True
+            except Exception: pass
+            
+        except Exception: pass
+        await asyncio.sleep(0.15)
     return False
 
 async def find_button_index_with_keyword(message, keyword: str):
@@ -303,35 +278,45 @@ async def _same_message_equiv(a, b) -> bool:
     except Exception: return False
 
 async def wait_for_bot_message(after_dt: datetime = None, timeout=BOT_RESPONSE_TIMEOUT, prev_msg=None):
-    if after_dt is None: after_dt = datetime.now(timezone.utc)
+    # Добавляем запас в 2 секунды назад, чтобы не пропустить сообщения из-за разницы во времени серверов
+    if after_dt is None: 
+        after_dt = datetime.now(timezone.utc) - timedelta(seconds=2)
+    else:
+        after_dt = after_dt - timedelta(seconds=2)
+        
     deadline = time.time() + timeout
     
+    # Сначала проверяем последние сообщения, вдруг ответ уже пришел
     try:
-        recent = await client.get_messages(QALAIS_BOT_ID, limit=6)
-    except Exception: recent = []
-    
-    if recent:
-        for m in recent:
-            if getattr(m, "date", None) and m.date > after_dt:
-                if prev_msg is not None and await _same_message_equiv(m, prev_msg): continue
-                return m
+        recent = await client.get_messages(QALAIS_BOT_ID, limit=8)
+        if recent:
+            for m in recent:
+                if getattr(m, 'date', None) and m.date > after_dt:
+                    if prev_msg is not None and getattr(m, 'id', None) == getattr(prev_msg, 'id', None):
+                        # Если это то же сообщение, проверяем, изменились ли кнопки
+                        if not await _same_message_equiv(m, prev_msg):
+                            return m
+                        continue
+                    return m
+    except Exception: pass
 
     while time.time() < deadline and not _stop_event.is_set():
         remaining = deadline - time.time()
         try:
-            msg = await asyncio.wait_for(bot_msg_queue.get(), timeout=min(remaining, BOT_RESPONSE_TIMEOUT))
-        except asyncio.TimeoutError: return None
-        except Exception: continue
+            msg = await asyncio.wait_for(bot_msg_queue.get(), timeout=min(remaining, 2.0))
+        except asyncio.TimeoutError: continue
         
         if not msg: continue
         
-        mdate = getattr(msg, "date", None)
-        if prev_msg is not None and getattr(msg, "id", None) == getattr(prev_msg, "id", None):
-            if not await _same_message_equiv(msg, prev_msg): return msg
-            else: continue
+        # Если пришло обновление того же сообщения (редактирование)
+        if prev_msg is not None and getattr(msg, 'id', None) == getattr(prev_msg, 'id', None):
+            if not await _same_message_equiv(msg, prev_msg):
+                return msg
+            continue
 
-        if mdate and mdate > after_dt: return msg
-        if getattr(msg, "buttons", None): return msg
+        mdate = getattr(msg, 'date', None)
+        if mdate and mdate > after_dt:
+            return msg
 
     return None
 
@@ -435,16 +420,6 @@ def contains_any(text: str, keywords):
         if k in text: return True
     return False
 
-# ----------------- Helpers for logging -----------------
-def _buttons_summary(message):
-    try:
-        rows = []
-        for row in getattr(message, "buttons", []):
-            rows.append([ (getattr(b,"text","") or "").replace("\u2800","") for b in row ])
-        return rows
-    except Exception:
-        return []
-
 # ----------------- Основной воркер -----------------
 async def fisher_worker():
     logger.info("🚀 Fisher worker started")
@@ -482,7 +457,6 @@ async def fisher_worker():
                 await asyncio.sleep(1)
                 continue
 
-            logger.debug("menu_msg arrived id=%s text='%.100s' buttons=%s", getattr(menu_msg,'id',None), (menu_msg.message or menu_msg.raw_text or '')[:100], _buttons_summary(menu_msg))
             txt = msg_text_lower(menu_msg)
 
             if contains_any(txt, MENU_KEYWORDS):
@@ -516,7 +490,6 @@ async def fisher_worker():
                     res_txt = msg_text_lower(res_msg) if res_msg else ""
 
                     if res_msg and contains_any(res_txt, CATCH_SUCCESS_KEYWORDS):
-                        logger.debug("Catch success message: id=%s buttons=%s", getattr(res_msg,'id',None), _buttons_summary(res_msg))
                         idx_now, btn_now = await find_button_index_with_keyword(res_msg, "рыбач")
                         if idx_now is not None:
                             success = await click_button_by_flat_index(res_msg, idx_now)
@@ -729,10 +702,6 @@ async def cmd_stop_listener(event):
         await event.reply("⛔ Авто-рыбалка остановлена.")
 
 async def main():
-    global _stop_event
-    # Привязываем событие к текущему loop
-    _stop_event = asyncio.Event()
-
     print("Connecting to Telegram...")
     await client.start()
     
@@ -753,5 +722,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Interrupted, exiting...")
-
-
