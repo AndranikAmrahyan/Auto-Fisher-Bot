@@ -496,48 +496,21 @@ async def fisher_worker():
                             if success:
                                 fishing_in_progress = True
                                 last_click_time = datetime.now(timezone.utc)
+                                # Ждем, пока сообщение отредактируется на "закинули удочку"
                                 after_click = datetime.now(timezone.utc)
-                                response = await wait_for_bot_message(after_dt=after_click, timeout=10, prev_msg=res_msg)
+                                response = await wait_for_bot_message(after_dt=after_click, timeout=15, prev_msg=res_msg)
                                 if response:
-                                    menu_msg = response
-                                    continue
-                                else:
-                                    if not last_click_time or (datetime.now(timezone.utc) - last_click_time).total_seconds() >= COOLDOWN_AFTER_CLICK:
-                                        try:
-                                            await client.send_message(QALAIS_BOT_ID, FISH_CMD)
-                                            last_send_time = datetime.now(timezone.utc)
-                                            fishing_in_progress = True
-                                            last_click_time = datetime.now(timezone.utc)
-                                            await asyncio.sleep(0.5)
-                                            continue
-                                        except Exception: pass
-                            await asyncio.sleep(0.5)
-                            continue
-
-                        next_msg = await wait_for_bot_message(after_dt=res_msg.date, prev_msg=res_msg, timeout=10)
-                        if next_msg:
-                            idx, btn_text = await find_button_index_with_keyword(next_msg, "рыбач")
-                            if idx is not None:
-                                await click_button_by_flat_index(next_msg, idx)
-                                fishing_in_progress = True
-                                last_click_time = datetime.now(timezone.utc)
-                            else:
-                                if not last_click_time or (datetime.now(timezone.utc) - last_click_time).total_seconds() >= COOLDOWN_AFTER_CLICK:
-                                    try:
-                                        await client.send_message(QALAIS_BOT_ID, FISH_CMD)
-                                        last_send_time = datetime.now(timezone.utc)
-                                        fishing_in_progress = True
-                                        last_click_time = datetime.now(timezone.utc)
-                                    except Exception: pass
-                        else:
-                            if not last_click_time or (datetime.now(timezone.utc) - last_click_time).total_seconds() >= COOLDOWN_AFTER_CLICK:
-                                try:
-                                    await client.send_message(QALAIS_BOT_ID, FISH_CMD)
-                                    last_send_time = datetime.now(timezone.utc)
-                                    fishing_in_progress = True
-                                    last_click_time = datetime.now(timezone.utc)
-                                except Exception: pass
-                        await asyncio.sleep(0.5)
+                                    # Важно: подменяем текущее сообщение новым состоянием и идем на следующую итерацию
+                                    menu_msg = response 
+                                    continue 
+                        
+                        # Если кнопка не нажалась или сообщение не обновилось - страхуемся отправкой текста
+                        if not last_click_time or (datetime.now(timezone.utc) - last_click_time).total_seconds() >= COOLDOWN_AFTER_CLICK:
+                            await client.send_message(QALAIS_BOT_ID, FISH_CMD)
+                            last_send_time = datetime.now(timezone.utc)
+                            fishing_in_progress = True
+                            last_click_time = datetime.now(timezone.utc)
+                        await asyncio.sleep(1.0)
                         continue
 
                     if res_msg:
@@ -589,49 +562,23 @@ async def fisher_worker():
                             if success:
                                 fishing_in_progress = True
                                 last_click_time = datetime.now(timezone.utc)
+                                # Ждем, пока сообщение отредактируется на "закинули удочку"
                                 after_click = datetime.now(timezone.utc)
-                                response = await wait_for_bot_message(after_dt=after_click, timeout=10, prev_msg=res_msg)
+                                response = await wait_for_bot_message(after_dt=after_click, timeout=15, prev_msg=res_msg)
                                 if response:
-                                    menu_msg = response
-                                    continue
-                                else:
-                                    if not last_click_time or (datetime.now(timezone.utc) - last_click_time).total_seconds() >= COOLDOWN_AFTER_CLICK:
-                                        try:
-                                            await client.send_message(QALAIS_BOT_ID, FISH_CMD)
-                                            last_send_time = datetime.now(timezone.utc)
-                                            fishing_in_progress = True
-                                            last_click_time = datetime.now(timezone.utc)
-                                            await asyncio.sleep(0.5)
-                                            continue
-                                        except Exception: pass
-                            await asyncio.sleep(0.5)
-                            continue
+                                    # Важно: подменяем текущее сообщение новым состоянием и идем на следующую итерацию
+                                    menu_msg = response 
+                                    continue 
                         
-                        next_msg = await wait_for_bot_message(after_dt=res_msg.date, prev_msg=res_msg, timeout=10)
-                        if next_msg:
-                            idx, btn_text = await find_button_index_with_keyword(next_msg, "рыбач")
-                            if idx is not None:
-                                await click_button_by_flat_index(next_msg, idx)
-                                fishing_in_progress = True
-                                last_click_time = datetime.now(timezone.utc)
-                            else:
-                                if not last_click_time or (datetime.now(timezone.utc) - last_click_time).total_seconds() >= COOLDOWN_AFTER_CLICK:
-                                    try:
-                                        await client.send_message(QALAIS_BOT_ID, FISH_CMD)
-                                        last_send_time = datetime.now(timezone.utc)
-                                        fishing_in_progress = True
-                                        last_click_time = datetime.now(timezone.utc)
-                                    except Exception: pass
-                        else:
-                            if not last_click_time or (datetime.now(timezone.utc) - last_click_time).total_seconds() >= COOLDOWN_AFTER_CLICK:
-                                try:
-                                    await client.send_message(QALAIS_BOT_ID, FISH_CMD)
-                                    last_send_time = datetime.now(timezone.utc)
-                                    fishing_in_progress = True
-                                    last_click_time = datetime.now(timezone.utc)
-                                except Exception: pass
-                        await asyncio.sleep(0.5)
+                        # Если кнопка не нажалась или сообщение не обновилось - страхуемся отправкой текста
+                        if not last_click_time or (datetime.now(timezone.utc) - last_click_time).total_seconds() >= COOLDOWN_AFTER_CLICK:
+                            await client.send_message(QALAIS_BOT_ID, FISH_CMD)
+                            last_send_time = datetime.now(timezone.utc)
+                            fishing_in_progress = True
+                            last_click_time = datetime.now(timezone.utc)
+                        await asyncio.sleep(1.0)
                         continue
+                    
                 continue
 
             await asyncio.sleep(1.0)
