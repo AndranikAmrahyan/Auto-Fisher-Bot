@@ -23,7 +23,7 @@ from google.genai import types
 load_dotenv()
 
 # --- Config for Telethon ---
-SESSION_STRING = os.getenv("SESSION_STRING_TELETHON")
+SESSION_STRING = os.getenv("SESSION_STRING_SERVER")
 API_ID = int(os.getenv("API_ID") or 0)
 API_HASH = os.getenv("API_HASH") or ""
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -32,7 +32,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 RENDER_APP_URL = os.getenv("RENDER_APP_URL") # Например: https://my-bot.onrender.com
 
 if not SESSION_STRING:
-    raise RuntimeError("SESSION_STRING_TELETHON not found in environment")
+    raise RuntimeError("SESSION_STRING_SERVER not found in environment")
 
 if API_ID == 0 or API_HASH == "":
     print("⚠️ Укажи API_ID и API_HASH в .env.")
@@ -712,4 +712,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+
         print("Interrupted, exiting...")
