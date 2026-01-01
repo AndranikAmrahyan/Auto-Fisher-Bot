@@ -492,19 +492,26 @@ async def fisher_worker():
                     if res_msg and contains_any(res_txt, CATCH_SUCCESS_KEYWORDS):
                         idx_now, btn_now = await find_button_index_with_keyword(res_msg, "рыбач")
                         if idx_now is not None:
+                            # Очищаем очередь, чтобы не подхватить старые изменения
+                            while not bot_msg_queue.empty():
+                                try: bot_msg_queue.get_nowait()
+                                except asyncio.QueueEmpty: break
+                                
                             success = await click_button_by_flat_index(res_msg, idx_now)
                             if success:
                                 fishing_in_progress = True
                                 last_click_time = datetime.now(timezone.utc)
+                                
+                                # Даем Telegram/Render 1.5 секунды на обработку клика перед поиском ответа
+                                await asyncio.sleep(1.5) 
+                                
                                 # Ждем, пока сообщение отредактируется на "закинули удочку"
-                                after_click = datetime.now(timezone.utc)
-                                response = await wait_for_bot_message(after_dt=after_click, timeout=15, prev_msg=res_msg)
+                                response = await wait_for_bot_message(after_dt=datetime.now(timezone.utc), timeout=20, prev_msg=res_msg)
                                 if response:
-                                    # Важно: подменяем текущее сообщение новым состоянием и идем на следующую итерацию
-                                    menu_msg = response 
-                                    continue 
+                                    menu_msg = response
+                                    continue # Возврат к началу цикла для ожидания рыбы
                         
-                        # Если кнопка не нажалась или сообщение не обновилось - страхуемся отправкой текста
+                        # Запасной вариант (fallback), если автоматика не сработала
                         if not last_click_time or (datetime.now(timezone.utc) - last_click_time).total_seconds() >= COOLDOWN_AFTER_CLICK:
                             await client.send_message(QALAIS_BOT_ID, FISH_CMD)
                             last_send_time = datetime.now(timezone.utc)
@@ -558,19 +565,26 @@ async def fisher_worker():
                     if res_msg and contains_any(res_txt, CATCH_SUCCESS_KEYWORDS):
                         idx_now, btn_now = await find_button_index_with_keyword(res_msg, "рыбач")
                         if idx_now is not None:
+                            # Очищаем очередь, чтобы не подхватить старые изменения
+                            while not bot_msg_queue.empty():
+                                try: bot_msg_queue.get_nowait()
+                                except asyncio.QueueEmpty: break
+                                
                             success = await click_button_by_flat_index(res_msg, idx_now)
                             if success:
                                 fishing_in_progress = True
                                 last_click_time = datetime.now(timezone.utc)
+                                
+                                # Даем Telegram/Render 1.5 секунды на обработку клика перед поиском ответа
+                                await asyncio.sleep(1.5) 
+                                
                                 # Ждем, пока сообщение отредактируется на "закинули удочку"
-                                after_click = datetime.now(timezone.utc)
-                                response = await wait_for_bot_message(after_dt=after_click, timeout=15, prev_msg=res_msg)
+                                response = await wait_for_bot_message(after_dt=datetime.now(timezone.utc), timeout=20, prev_msg=res_msg)
                                 if response:
-                                    # Важно: подменяем текущее сообщение новым состоянием и идем на следующую итерацию
-                                    menu_msg = response 
-                                    continue 
+                                    menu_msg = response
+                                    continue # Возврат к началу цикла для ожидания рыбы
                         
-                        # Если кнопка не нажалась или сообщение не обновилось - страхуемся отправкой текста
+                        # Запасной вариант (fallback), если автоматика не сработала
                         if not last_click_time or (datetime.now(timezone.utc) - last_click_time).total_seconds() >= COOLDOWN_AFTER_CLICK:
                             await client.send_message(QALAIS_BOT_ID, FISH_CMD)
                             last_send_time = datetime.now(timezone.utc)
