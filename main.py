@@ -52,12 +52,12 @@ CMD_STOPS = {"закончить", "завершить", "остановить",
 FISH_CMD = "рыбалка"
 
 # Tunables (берём из env с дефолтами, для Render лучше увеличить таймауты)
-FIND_EMOJI_TIMEOUT = float(os.getenv("FIND_EMOJI_TIMEOUT", "60.0"))
-BOT_RESPONSE_TIMEOUT = float(os.getenv("BOT_RESPONSE_TIMEOUT", "60.0"))
+FIND_EMOJI_TIMEOUT = 60.0
+BOT_RESPONSE_TIMEOUT = 60.0
 
 # Cooldowns
-COOLDOWN_AFTER_CLICK = float(os.getenv("COOLDOWN_AFTER_CLICK", "3.5"))
-MIN_SEND_INTERVAL = float(os.getenv("MIN_SEND_INTERVAL", "0.6"))
+COOLDOWN_AFTER_CLICK = 3.5
+MIN_SEND_INTERVAL = 0.6
 
 # Логирование
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -753,3 +753,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Interrupted, exiting...")
+
