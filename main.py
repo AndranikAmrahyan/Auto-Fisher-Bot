@@ -54,7 +54,7 @@ FISH_CMD = "рыбалка"
 # Tunables
 POLL_INTERVAL = 1.0
 FIND_EMOJI_TIMEOUT = 50.0
-BOT_RESPONSE_TIMEOUT = 50.0
+BOT_RESPONSE_TIMEOUT = 45.0
 
 # Cooldowns
 COOLDOWN_AFTER_CLICK = 3.0
@@ -714,5 +714,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print("Interrupted, exiting...")
+
 
 
