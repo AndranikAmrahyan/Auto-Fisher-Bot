@@ -515,7 +515,7 @@ async def solve_captcha_message(message) -> bool:
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 genai_client.models.generate_content,
-                model="gemini-1.5-flash",
+                model="gemini-flash-latest",
                 contents=[
                     types.Part.from_bytes(data=image_data, mime_type="image/jpeg"),
                     prompt
@@ -555,9 +555,15 @@ async def solve_captcha_message(message) -> bool:
 
 # ----------------- keywords -----------------
 MENU_KEYWORDS = ["меню рыбалки", "уровень рыбака", "поймано рыбы", "уникальные виды"]
-FISH_WAIT_KEYWORDS = ["вы закинули удочку в воду", "подсекайте ее", "подсечь рыбу"]
-CATCH_SUCCESS_KEYWORDS = ["вы поймали", "поздравляем", "сорвалась", "не успели", "оборвалась"]
-CAPTCHA_KEYWORDS = ["нам нужно убедиться", "нажмите на кнопку с эмодзи", "нажмите на кнопку ниже"]
+FISH_WAIT_KEYWORDS = ["вы закинули удочку в воду",
+                      "дождитесь момента, когда рыба зацепится за крючок и подсекайте ее",
+                      "у вас будет пару секунд, чтобы подсечь рыбу"]
+CATCH_SUCCESS_KEYWORDS = ["вы поймали рыбу", "вы поймали предмет", "поздравляем с удачной рыбалкой",
+                          "леска не выдержала и оборвалась", "сорвалась с крючка",
+                          "подсечь рыбу"]
+CAPTCHA_KEYWORDS = ["нам нужно убедиться, что вы не робот",
+                    "нажмите на кнопку с эмодзи, который отображен",
+                    "нажмите на кнопку ниже, чтобы продолжить"]
 
 def contains_any(text: str, keywords):
     if not text: return False
