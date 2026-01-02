@@ -44,6 +44,9 @@ if not GEMINI_API_KEY:
 else:
     genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
+# https://aistudio.google.com/u/1/usage?project=gen-lang-client-0290532217&timeRange=last-28-days&tab=rate-limit
+CAPTCHA_MODEL = "gemini-2.5-flash-lite"
+
 QALAIS_BOT_ID = 6964500387
 
 CMD_START = {"начать", "начинать", "старт", "start", "запуск", "go"}
@@ -515,7 +518,7 @@ async def solve_captcha_message(message) -> bool:
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 genai_client.models.generate_content,
-                model="gemini-flash-latest",
+                model=CAPTCHA_MODEL,
                 contents=[
                     types.Part.from_bytes(data=image_data, mime_type="image/jpeg"),
                     prompt
