@@ -51,12 +51,11 @@ CMD_STOPS = {"закончить", "завершить", "остановить",
 
 FISH_CMD = "рыбалка"
 
-# ========== ОПТИМИЗИРОВАННЫЕ НАСТРОЙКИ ДЛЯ RENDER ==========
-# Увеличиваем таймауты для медленных серверов
+# Tunables
 FIND_EMOJI_TIMEOUT = 50.0
 BOT_RESPONSE_TIMEOUT = 50.0
 
-# Увеличиваем кулдауны для надежности
+# Cooldowns
 COOLDOWN_AFTER_CLICK = 4.5
 MIN_SEND_INTERVAL = 0.8
 
@@ -152,9 +151,9 @@ async def _on_any_new_message(event):
                 try:
                     bot_msg_queue.put_nowait(m)
                 except asyncio.QueueFull:
-                    pass
-    except Exception:
-        pass
+                    logger.warning("Queue still full after cleanup, dropping message")
+    except Exception as e:
+        logger.debug("error in _on_any_new_message: %s", e)
 
 @client.on(events.MessageEdited(chats=QALAIS_BOT_ID))
 async def _on_any_edited_message(event):
@@ -172,11 +171,32 @@ async def _on_any_edited_message(event):
                 try:
                     bot_msg_queue.put_nowait(m)
                 except asyncio.QueueFull:
-                    pass
-    except Exception:
-        pass
+                    logger.warning("Queue still full after cleanup, dropping edited message")
+    except Exception as e:
+        logger.debug("error in _on_any_edited_message: %s", e)
 
 # ----------------- Utils -----------------
+EMOJI_RE = re.compile(
+    "[" 
+    "\U0001F300-\U0001F5FF"
+    "\U0001F600-\U0001F64F"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FA6F"
+    "]+",
+    flags=re.UNICODE,
+)
+
+UNSUPPORTED_EMOJI_LIKE = {
+    "�",        # U+FFFD replacement char
+    "⬜", "⬛",  # часто встречающиеся квадратные глифы
+    "□", "▢",
+    "☒", "☐",
+    "🪼",
+}
+
 def msg_text_lower(message) -> str:
     try:
         return (message.message or message.raw_text or "").lower()
@@ -204,7 +224,6 @@ async def click_button_by_flat_index(message, flat_index: int) -> bool:
                     message.click(flat_index),
                     timeout=5.0
                 )
-                logger.info(f"✅ Успешный клик по кнопке {flat_index}")
                 return True
             except (asyncio.TimeoutError, Exception):
                 pass
@@ -219,7 +238,7 @@ async def click_button_by_flat_index(message, flat_index: int) -> bool:
                         client.send_message(message.chat_id, flat_buttons[flat_index], reply_to=message.id),
                         timeout=5.0
                     )
-                    logger.info(f"✅ Отправлен текст кнопки {flat_index}")
+                    logger.debug(f"✅ Отправлен текст кнопки {flat_index}")
                     return True
             except (asyncio.TimeoutError, Exception):
                 pass
@@ -255,12 +274,18 @@ async def find_button_has_emoji(message):
     for row in getattr(message, "buttons", []):
         for b in row: flat.append((getattr(b, "text", "") or "").strip())
 
+    button_stats = {}
+    for s in flat:
+        if s: button_stats[s] = button_stats.get(s, 0) + 1
+    
+    most_common = max(button_stats.items(), key=lambda x: x[1])[0] if button_stats else ""
+    
     for i, s in enumerate(flat):
         if not s: continue
-        # Ищем любую кнопку с emoji (не текст)
-        if len(s) <= 4 and not any(ch.isalpha() for ch in s.lower()):
+        if all(ch in ("\u2800", "⠀") for ch in s): continue
+        if any(ch.isalpha() for ch in s.lower()): continue
+        if s != most_common and len(s) <= 3:
             return i, s
-    
     return None, None
 
 # ----------------- Waiters -----------------
@@ -358,7 +383,7 @@ async def poll_for_button_emoji(timeout=FIND_EMOJI_TIMEOUT):
     
     return None, None, None
 
-# ========== НОВЫЕ ФУНКЦИИ ДЛЯ ОБРАБОТКИ ЦИКЛА РЫБАЛКИ ==========
+# ========== ФУНКЦИИ ДЛЯ ОБРАБОТКИ ЦИКЛА РЫБАЛКИ ==========
 async def wait_for_fish_result(fish_msg_id, timeout=25.0):
     """
     Ожидает результат рыбалки, отслеживая редактирование сообщения с ID fish_msg_id
@@ -376,7 +401,6 @@ async def wait_for_fish_result(fish_msg_id, timeout=25.0):
             if fresh_msg and fresh_msg.id == fish_msg_id:
                 txt = msg_text_lower(fresh_msg)
                 if contains_any(txt, CATCH_SUCCESS_KEYWORDS):
-                    logger.info("🎣 Сообщение с рыбой отредактировано в результат")
                     return fresh_msg
         except (asyncio.TimeoutError, Exception):
             pass
@@ -390,7 +414,6 @@ async def wait_for_fish_result(fish_msg_id, timeout=25.0):
             for msg in recent:
                 txt = msg_text_lower(msg)
                 if contains_any(txt, CATCH_SUCCESS_KEYWORDS):
-                    logger.info("🎣 Найден результат рыбалки в истории")
                     return msg
         except (asyncio.TimeoutError, Exception):
             pass
@@ -404,7 +427,6 @@ async def wait_for_fish_result(fish_msg_id, timeout=25.0):
             if msg:
                 txt = msg_text_lower(msg)
                 if contains_any(txt, CATCH_SUCCESS_KEYWORDS):
-                    logger.info("🎣 Результат рыбалки получен через очередь")
                     return msg
         except asyncio.TimeoutError:
             continue
@@ -435,7 +457,6 @@ async def click_fish_button_after_result(result_msg, fish_msg_id=None):
             # Ищем кнопку "рыбачить"
             idx, btn_text = await find_button_index_with_keyword(result_msg, "рыбач")
             if idx is not None:
-                logger.info(f"🎯 Найдена кнопка 'рыбачить': {btn_text}")
                 success = await click_button_by_flat_index(result_msg, idx)
                 if success:
                     return True
@@ -470,7 +491,7 @@ async def solve_captcha_message(message) -> bool:
     unique_options = [b for b in flat_buttons if b and not b.isspace()]
     
     if not unique_options:
-        logger.info("CAPTCHA: Кнопки не найдены.")
+        logger.error("CAPTCHA: Кнопки не найдены.")
         return False
 
     tmp = "captcha_tmp.jpg"
@@ -589,7 +610,6 @@ async def fisher_worker():
                     fishing_in_progress = True
                     last_click_time = datetime.now(timezone.utc)
                     consecutive_fails = 0
-                    logger.info("🎣 Отправлена команда 'рыбалка'")
                 except Exception as e:
                     logger.warning(f"send_message failed: {e}")
                     consecutive_fails += 1
@@ -628,7 +648,6 @@ async def fisher_worker():
             
             # 2. Меню рыбалки (нужно нажать "рыбачить")
             if contains_any(txt, MENU_KEYWORDS):
-                logger.info("📋 Обнаружено меню рыбалки")
                 idx, btn_text = await find_button_index_with_keyword(menu_msg, "рыбач")
                 
                 if idx is None:
@@ -648,7 +667,6 @@ async def fisher_worker():
                         fishing_in_progress = True
                         last_click_time = datetime.now(timezone.utc)
                         consecutive_fails = 0
-                        logger.info("✅ Нажата кнопка 'рыбачить'")
                         
                         # Ждем сообщение о закинутой удочке
                         await asyncio.sleep(2.0)
@@ -656,17 +674,14 @@ async def fisher_worker():
                         if fish_wait_msg:
                             txt_fish = msg_text_lower(fish_wait_msg)
                             if contains_any(txt_fish, FISH_WAIT_KEYWORDS):
-                                logger.info("🎣 Удочка закинута, ждем рыбу...")
                                 # Ищем кнопку с рыбой
                                 found_msg, found_idx, found_text = await poll_for_button_emoji(timeout=25.0)
                                 if found_msg:
-                                    logger.info(f"🐟 Найдена кнопка с рыбой: {found_text}")
                                     fish_msg_id = found_msg.id
                                     
                                     # Нажимаем на рыбу
                                     success_fish = await click_button_by_flat_index(found_msg, found_idx)
                                     if success_fish:
-                                        logger.info("✅ Нажата кнопка с рыбой")
                                         last_click_time = datetime.now(timezone.utc)
                                         
                                         # ========== КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ==========
@@ -675,9 +690,7 @@ async def fisher_worker():
                                         
                                         result_msg = await wait_for_fish_result(fish_msg_id, timeout=20.0)
                                         
-                                        if result_msg:
-                                            logger.info("🎣 Получен результат рыбалки")
-                                            
+                                        if result_msg:                                            
                                             # Пытаемся нажать кнопку "рыбачить" после результата
                                             fish_button_success = await click_fish_button_after_result(result_msg, fish_msg_id)
                                             
@@ -685,7 +698,6 @@ async def fisher_worker():
                                                 fishing_in_progress = True
                                                 last_click_time = datetime.now(timezone.utc)
                                                 consecutive_fails = 0
-                                                logger.info("✅ Нажата кнопка 'рыбачить' после результата")
                                                 
                                                 # Короткая пауза перед продолжением
                                                 await asyncio.sleep(1.5)
@@ -720,9 +732,7 @@ async def fisher_worker():
                 continue
             
             # 3. Ожидание поклевки (сообщение с FISH_WAIT_KEYWORDS)
-            if contains_any(txt, FISH_WAIT_KEYWORDS):
-                logger.info("🎣 Обнаружено ожидание поклевки")
-                
+            if contains_any(txt, FISH_WAIT_KEYWORDS):                
                 # Ищем кнопку с рыбой в текущем сообщении
                 idx, btn_text = await find_button_has_emoji(menu_msg)
                 if idx is not None:
@@ -732,13 +742,11 @@ async def fisher_worker():
                     found_msg, found_idx, found_text = await poll_for_button_emoji(timeout=20.0)
                 
                 if found_msg and found_idx is not None:
-                    logger.info(f"🐟 Найдена кнопка с рыбой: {found_text}")
                     fish_msg_id = found_msg.id
                     
                     # Нажимаем на рыбу
                     success_fish = await click_button_by_flat_index(found_msg, found_idx)
                     if success_fish:
-                        logger.info("✅ Нажата кнопка с рыбой")
                         last_click_time = datetime.now(timezone.utc)
                         
                         # ========== КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ==========
@@ -747,9 +755,7 @@ async def fisher_worker():
                         
                         result_msg = await wait_for_fish_result(fish_msg_id, timeout=20.0)
                         
-                        if result_msg:
-                            logger.info("🎣 Получен результат рыбалки")
-                            
+                        if result_msg:                            
                             # Пытаемся нажать кнопку "рыбачить" после результата
                             fish_button_success = await click_fish_button_after_result(result_msg, fish_msg_id)
                             
@@ -757,7 +763,6 @@ async def fisher_worker():
                                 fishing_in_progress = True
                                 last_click_time = datetime.now(timezone.utc)
                                 consecutive_fails = 0
-                                logger.info("✅ Нажата кнопка 'рыбачить' после результата")
                                 
                                 # Короткая пауза перед продолжением
                                 await asyncio.sleep(1.5)
@@ -781,9 +786,7 @@ async def fisher_worker():
                 continue
             
             # 4. Результат рыбалки (если мы пропустили предыдущие шаги)
-            if contains_any(txt, CATCH_SUCCESS_KEYWORDS):
-                logger.info("🎣 Обнаружен результат рыбалки")
-                
+            if contains_any(txt, CATCH_SUCCESS_KEYWORDS):                
                 # Пытаемся нажать кнопку "рыбачить"
                 fish_button_success = await click_fish_button_after_result(menu_msg)
                 
@@ -791,7 +794,6 @@ async def fisher_worker():
                     fishing_in_progress = True
                     last_click_time = datetime.now(timezone.utc)
                     consecutive_fails = 0
-                    logger.info("✅ Нажата кнопка 'рыбачить' после результата")
                     await asyncio.sleep(1.5)
                     continue
                 else:
@@ -873,16 +875,16 @@ async def cmd_stop_listener(event):
         await event.reply("⛔ Авто-рыбалка остановлена.")
 
 async def main():
-    print("Connecting to Telegram...")
+    logger.info("Connecting to Telegram...")
     await client.start()
     
     # Запускаем задачу самопингования
     if RENDER_APP_URL:
         asyncio.create_task(self_ping())
     else:
-        print("⚠️ RENDER_APP_URL не задан, самопингование отключено.")
+        logger.warning("⚠️ RENDER_APP_URL не задан, самопингование отключено.")
 
-    print("Client started. Send 'начать' (in the private chat with the game bot) to run.")
+    logger.info("Client started. Send 'начать' (in the private chat with the game bot) to run.")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
@@ -892,4 +894,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Interrupted, exiting...")
+        logger.info("Interrupted, exiting...")
