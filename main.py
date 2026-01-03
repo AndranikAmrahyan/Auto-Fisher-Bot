@@ -708,7 +708,7 @@ async def fisher_worker():
                             if contains_any(txt_fish, FISH_WAIT_KEYWORDS):
                                 logger.info("🎣 Удочка закинута, ждем рыбу...")
                                 # Ищем кнопку с рыбой
-                                found_msg, found_idx, found_text = await poll_for_button_emoji(timeout=25.0)
+                                found_msg, found_idx, found_text = await poll_for_button_emoji(timeout=30.0)
                                 if found_msg:
                                     logger.info(f"🐟 Найдена кнопка с рыбой: {found_text}")
                                     fish_msg_id = found_msg.id
@@ -778,7 +778,7 @@ async def fisher_worker():
                     found_msg, found_idx, found_text = menu_msg, idx, btn_text
                 else:
                     # Ищем в истории
-                    found_msg, found_idx, found_text = await poll_for_button_emoji(timeout=20.0)
+                    found_msg, found_idx, found_text = await poll_for_button_emoji(timeout=30.0)
                 
                 if found_msg and found_idx is not None:
                     logger.info(f"🐟 Найдена кнопка с рыбой: {found_text}")
