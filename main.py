@@ -550,7 +550,7 @@ async def solve_captcha_message(message) -> Optional[bool]:
     - False: капча не решена (но не критическая ошибка)
     - None: критическая ошибка, бот должен остановиться
     """
-    global last_captcha_error_type, captcha_error_count
+    global last_captcha_error_type, captcha_error_count, current_model_index, successful_model_index
     
     if not genai_client:
         logger.error("CAPTCHA: Клиент Gemini не инициализирован.")
@@ -662,7 +662,6 @@ async def solve_captcha_message(message) -> Optional[bool]:
                     
                     # Если использовали не первую модель, возвращаемся к ней для следующих капч
                     if successful_model_index is not None and successful_model_index != 0:
-                        global current_model_index
                         current_model_index = successful_model_index
                         logger.info(f"🔄 Возвращаемся к успешной модели: {CAPTCHA_MODELS[current_model_index]}")
                     
