@@ -6,6 +6,7 @@ import asyncio
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 # Сторонние библиотеки
 from dotenv import load_dotenv
@@ -44,8 +45,17 @@ if not GEMINI_API_KEY:
 else:
     genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# https://aistudio.google.com/u/1/usage?project=gen-lang-client-0290532217&timeRange=last-28-days&tab=rate-limit
-CAPTCHA_MODEL = "gemini-2.5-flash-lite"
+# ========== МОДЕЛИ ДЛЯ КАПЧИ ==========
+# https://aistudio.google.com/u/1/usage?project=gen-lang-client-0290532217&timeRange=last-1-day&tab=rate-limit
+CAPTCHA_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite", 
+    "gemini-robotics-er-1.5-preview"
+]
+current_model_index = 0  # Начинаем с первой модели
+successful_model_index = None  # Индекс успешной модели
+
+SUPPORT_CONTACT = "@andranik_amrahyan"  # Контакт поддержки
 
 QALAIS_BOT_ID = 6964500387
 
@@ -97,7 +107,7 @@ async def self_ping():
             try:
                 async with session.get(f"{RENDER_APP_URL}/ping") as resp:
                     if resp.status == 200:
-                        logger.debug("Ping OK")
+                        logger.info("Ping OK")
                     else:
                         logger.warning(f"Ping failed with status: {resp.status}")
             except Exception as e:
@@ -114,6 +124,94 @@ _worker_running = False
 _stop_event = asyncio.Event()
 
 bot_msg_queue: asyncio.Queue = asyncio.Queue(maxsize=128)
+
+# ========== ФУНКЦИИ УПРАВЛЕНИЯ МОДЕЛЯМИ КАПЧИ ==========
+async def rotate_captcha_model() -> bool:
+    """Переключает на следующую модель капчи. Возвращает True если есть еще модели, False если все исчерпаны."""
+    global current_model_index, successful_model_index
+    
+    logger.info(f"🔄 Ротация модели капчи. Текущая: {CAPTCHA_MODELS[current_model_index]}")
+    
+    # Сохраняем начальный индекс для проверки полного цикла
+    start_index = current_model_index
+    
+    # Пробуем следующую модель
+    next_index = (current_model_index + 1) % len(CAPTCHA_MODELS)
+    
+    # Если мы вернулись к успешной модели или прошли полный цикл
+    if next_index == start_index:
+        logger.error("❌ Все модели капчи исчерпаны!")
+        return False
+    
+    current_model_index = next_index
+    logger.info(f"✅ Переключено на модель: {CAPTCHA_MODELS[current_model_index]}")
+    return True
+
+async def get_current_captcha_model() -> str:
+    """Возвращает текущую модель капчи."""
+    global current_model_index
+    return CAPTCHA_MODELS[current_model_index]
+
+def set_successful_captcha_model():
+    """Сохраняет текущую модель как успешную."""
+    global successful_model_index, current_model_index
+    successful_model_index = current_model_index
+    logger.info(f"💾 Сохранена успешная модель: {CAPTCHA_MODELS[successful_model_index]}")
+
+# Переменные для отслеживания повторяющихся некритических ошибок
+last_captcha_error_type = None
+captcha_error_count = 0
+
+async def stop_bot_with_captcha_error(error_message: str, is_limit_exhausted: bool = False):
+    """Останавливает бота с сообщением об ошибке капчи."""
+    global _worker_task, _worker_running, _stop_event, _worker_task
+    
+    logger.error(f"🛑 Остановка бота из-за ошибки капчи: {error_message}")
+    
+    if is_limit_exhausted:
+        message_text = (
+            "❌ Достигнут лимит всех моделей для решения капчи!\n\n"
+            "Все доступные модели ИИ исчерпали свои лимиты:\n"
+            f"- {', '.join(CAPTCHA_MODELS)}\n\n"
+            "⛔ Авто-рыбалка остановлена.\n"
+            "Попробуйте снова через некоторое время."
+        )
+    else:
+        message_text = (
+            "❌ Критическая ошибка при решении капчи!\n\n"
+            f"Ошибка: {error_message}\n\n"
+            "⚠️ Пожалуйста, свяжитесь со службой поддержки и сообщите об этой ошибке.\n"
+            f"Поддержка: {SUPPORT_CONTACT}\n\n"
+            "⛔ Авто-рыбалка остановлена."
+        )
+    
+    # Отправляем сообщение об ошибке в чат
+    if error_message:
+        try:
+            await client.send_message(QALAIS_BOT_ID, message_text)
+        except Exception as e:
+            logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
+    
+    # Останавливаем воркер
+    if _worker_running:
+        _stop_event.set()
+        if _worker_task:
+            _worker_task.cancel()
+            try:
+                await _worker_task
+            except asyncio.CancelledError:
+                pass
+            _worker_task = None
+        
+        # Очищаем очередь сообщений
+        while not bot_msg_queue.empty():
+            try:
+                bot_msg_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        
+        _worker_running = False
+        logger.error("🛑 Бот остановлен из-за ошибки капчи")
 
 # ----------------- Event handlers -----------------
 def _resolve_peer_user_id(msg):
@@ -179,19 +277,6 @@ async def _on_any_edited_message(event):
         pass
 
 # ----------------- Utils -----------------
-EMOJI_RE = re.compile(
-    "[" 
-    "\U0001F300-\U0001F5FF"
-    "\U0001F600-\U0001F64F"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F700-\U0001F77F"
-    "\U0001F780-\U0001F7FF"
-    "\U0001F900-\U0001F9FF"
-    "\U0001FA00-\U0001FA6F"
-    "]+",
-    flags=re.UNICODE,
-)
-
 def msg_text_lower(message) -> str:
     try:
         return (message.message or message.raw_text or "").lower()
@@ -219,7 +304,6 @@ async def click_button_by_flat_index(message, flat_index: int) -> bool:
                     message.click(flat_index),
                     timeout=5.0
                 )
-                logger.info(f"✅ Успешный клик по кнопке {flat_index}")
                 return True
             except (asyncio.TimeoutError, Exception) as e:
                 pass
@@ -382,7 +466,6 @@ async def wait_for_fish_result(fish_msg_id, timeout=25.0):
             if fresh_msg and fresh_msg.id == fish_msg_id:
                 txt = msg_text_lower(fresh_msg)
                 if contains_any(txt, CATCH_SUCCESS_KEYWORDS):
-                    logger.info("🎣 Сообщение с рыбой отредактировано в результат")
                     return fresh_msg
         except (asyncio.TimeoutError, Exception):
             pass
@@ -396,7 +479,6 @@ async def wait_for_fish_result(fish_msg_id, timeout=25.0):
             for msg in recent:
                 txt = msg_text_lower(msg)
                 if contains_any(txt, CATCH_SUCCESS_KEYWORDS):
-                    logger.info("🎣 Найден результат рыбалки в истории")
                     return msg
         except (asyncio.TimeoutError, Exception):
             pass
@@ -410,7 +492,6 @@ async def wait_for_fish_result(fish_msg_id, timeout=25.0):
             if msg:
                 txt = msg_text_lower(msg)
                 if contains_any(txt, CATCH_SUCCESS_KEYWORDS):
-                    logger.info("🎣 Результат рыбалки получен через очередь")
                     return msg
         except asyncio.TimeoutError:
             continue
@@ -441,7 +522,6 @@ async def click_fish_button_after_result(result_msg, fish_msg_id=None):
             # Ищем кнопку "рыбачить"
             idx, btn_text = await find_button_index_with_keyword(result_msg, "рыбач")
             if idx is not None:
-                logger.info(f"🎯 Найдена кнопка 'рыбачить': {btn_text}")
                 success = await click_button_by_flat_index(result_msg, idx)
                 if success:
                     return True
@@ -461,11 +541,21 @@ async def click_fish_button_after_result(result_msg, fish_msg_id=None):
     
     return False
 
-# ----------------- Решение капчи (Google GenAI) -----------------
-async def solve_captcha_message(message) -> bool:
+# ========== УЛУЧШЕННОЕ РЕШЕНИЕ КАПЧИ С РОТАЦИЕЙ МОДЕЛЕЙ ==========
+async def solve_captcha_message(message) -> Optional[bool]:
+    """
+    Решает капчу с ротацией моделей.
+    Возвращает:
+    - True: капча решена успешно
+    - False: капча не решена (но не критическая ошибка)
+    - None: критическая ошибка, бот должен остановиться
+    """
+    global last_captcha_error_type, captcha_error_count
+    
     if not genai_client:
         logger.error("CAPTCHA: Клиент Gemini не инициализирован.")
-        return False
+        await stop_bot_with_captcha_error("Клиент Gemini не инициализирован")
+        return None
 
     flat_buttons = []
     for row in getattr(message, "buttons", []):
@@ -480,6 +570,8 @@ async def solve_captcha_message(message) -> bool:
         return False
 
     tmp = "captcha_tmp.jpg"
+    
+    # Загружаем изображение капчи
     try:
         await asyncio.wait_for(
             client.download_media(message.media, file=tmp),
@@ -488,64 +580,180 @@ async def solve_captcha_message(message) -> bool:
         
         with open(tmp, "rb") as f:
             image_data = f.read()
-        
-        prompt = (
-            f"Look at the object in this image. "
-            f"Select the most appropriate emoji from this list: {unique_options}. "
-            f"Return only the emoji character itself."
-        )
-        
-        logger.info(f"CAPTCHA: Запрос к Gemini API... Варианты: {unique_options}")
-        
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                genai_client.models.generate_content,
-                model=CAPTCHA_MODEL,
-                contents=[
-                    types.Part.from_bytes(data=image_data, mime_type="image/jpeg"),
-                    prompt
-                ]
-            ),
-            timeout=15.0
-        )
-        
-        predicted_emoji = response.text.strip()
-        logger.info(f"CAPTCHA: Ответ API: '{predicted_emoji}'")
-
-        best_idx = -1
-        for i, btn_txt in enumerate(flat_buttons):
-            if predicted_emoji in btn_txt:
-                best_idx = i
-                break
-        
-        if best_idx != -1:
-            logger.info(f"CAPTCHA: Нажимаем кнопку {best_idx}")
-            try:
-                await asyncio.wait_for(
-                    message.click(best_idx),
-                    timeout=5.0
-                )
-                logger.info(f"✅ Капча решена успешно")
-                return True
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.warning(f"❌ Не удалось нажать кнопку капчи: {e}")
-                return False
-        else:
-            logger.warning("CAPTCHA: Соответствующая кнопка не найдена.")
-            return False
-
-    except asyncio.TimeoutError:
-        logger.warning("CAPTCHA: Таймаут при решении капчи")
-        return False
     except Exception as e:
-        logger.warning(f"CAPTCHA: Ошибка: {e}")
+        logger.warning(f"CAPTCHA: Ошибка загрузки изображения: {e}")
+        # Проверяем, была ли такая же ошибка в прошлый раз
+        if last_captcha_error_type == "image_load_error":
+            captcha_error_count += 1
+            if captcha_error_count >= 2:
+                logger.error("CAPTCHA: Повторная ошибка загрузки изображения капчи!")
+                error_message = (
+                    "❌ Критическая ошибка при решении капчи!\n\n"
+                    "Не удалось загрузить изображение капчи дважды подряд.\n\n"
+                    "⚠️ Пожалуйста, свяжитесь со службой поддержки и сообщите об этой ошибке.\n"
+                    f"Поддержка: {SUPPORT_CONTACT}\n\n"
+                    "⛔ Авто-рыбалка остановлена."
+                )
+                try:
+                    await client.send_message(QALAIS_BOT_ID, error_message)
+                except Exception as send_err:
+                    logger.error(f"Не удалось отправить сообщение об ошибке: {send_err}")
+                
+                # Останавливаем бота
+                await stop_bot_with_captcha_error("Повторная ошибка загрузки изображения капчи")
+                return None
+        else:
+            last_captcha_error_type = "image_load_error"
+            captcha_error_count = 1
         return False
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except:
-                pass
+    
+    prompt = (
+        f"Look at the object in this image. "
+        f"Select the most appropriate emoji from this list: {unique_options}. "
+        f"Return only the emoji character itself."
+    )
+    
+    # Сохраняем начальный индекс для проверки полного цикла
+    start_model_index = current_model_index
+    models_tried = 0
+    
+    # Пробуем решить капчу с ротацией моделей
+    while models_tried < len(CAPTCHA_MODELS):
+        current_model = await get_current_captcha_model()
+        logger.info(f"🔍 CAPTCHA: Используем модель {current_model} (попытка {models_tried + 1}/{len(CAPTCHA_MODELS)})")
+        
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    genai_client.models.generate_content,
+                    model=current_model,
+                    contents=[
+                        types.Part.from_bytes(data=image_data, mime_type="image/jpeg"),
+                        prompt
+                    ]
+                ),
+                timeout=15.0
+            )
+            
+            predicted_emoji = response.text.strip()
+            logger.info(f"✅ CAPTCHA: Ответ API: '{predicted_emoji}'")
+            
+            best_idx = -1
+            for i, btn_txt in enumerate(flat_buttons):
+                if predicted_emoji in btn_txt:
+                    best_idx = i
+                    break
+            
+            if best_idx != -1:
+                logger.info(f"🎯 CAPTCHA: Нажимаем кнопку {best_idx}")
+                try:
+                    await asyncio.wait_for(
+                        message.click(best_idx),
+                        timeout=5.0
+                    )
+                    logger.info(f"✅ Капча решена успешно с моделью {current_model}")
+                    
+                    # Сбрасываем счетчик ошибок при успешном решении
+                    last_captcha_error_type = None
+                    captcha_error_count = 0
+                    
+                    # Сохраняем успешную модель для будущего использования
+                    set_successful_captcha_model()
+                    
+                    # Если использовали не первую модель, возвращаемся к ней для следующих капч
+                    if successful_model_index is not None and successful_model_index != 0:
+                        global current_model_index
+                        current_model_index = successful_model_index
+                        logger.info(f"🔄 Возвращаемся к успешной модели: {CAPTCHA_MODELS[current_model_index]}")
+                    
+                    return True
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.warning(f"❌ Не удалось нажать кнопку капчи: {e}")
+                    
+                    # Проверяем, была ли такая же ошибка в прошлый раз
+                    if last_captcha_error_type == "button_click_error":
+                        captcha_error_count += 1
+                        if captcha_error_count >= 2:
+                            logger.error("CAPTCHA: Повторная ошибка нажатия кнопки капчи!")
+                            error_message = (
+                                "❌ Критическая ошибка при решении капчи!\n\n"
+                                "Не удалось нажать кнопку капчи дважды подряд.\n\n"
+                                "⚠️ Пожалуйста, свяжитесь со службой поддержки и сообщите об этой ошибке.\n"
+                                f"Поддержка: {SUPPORT_CONTACT}\n\n"
+                                "⛔ Авто-рыбалка остановлена."
+                            )
+                            try:
+                                await client.send_message(QALAIS_BOT_ID, error_message)
+                            except Exception as send_err:
+                                logger.error(f"Не удалось отправить сообщение об ошибке: {send_err}")
+                            
+                            # Останавливаем бота
+                            await stop_bot_with_captcha_error("Повторная ошибка нажатия кнопки капчи")
+                            return None
+                    else:
+                        last_captcha_error_type = "button_click_error"
+                        captcha_error_count = 1
+                    return False
+            else:
+                logger.error("❌ CAPTCHA: Соответствующая кнопка не найдена в ответе API")
+                
+                # Отправляем сообщение пользователю о необходимости решить капчу вручную
+                error_message = (
+                    "❌ Не удалось решить капчу автоматически.\n\n"
+                    "Пожалуйста, решите капчу вручную и снова запустите авто рыбалку.\n"
+                    "Если это случается часто, свяжитесь со службой поддержки.\n"
+                    f"Поддержка: {SUPPORT_CONTACT}\n\n"
+                    "⛔ Авто-рыбалка остановлена."
+                )
+                try:
+                    await client.send_message(QALAIS_BOT_ID, error_message)
+                except Exception as send_err:
+                    logger.error(f"Не удалось отправить сообщение об ошибке: {send_err}")
+                
+                # Останавливаем бота
+                await stop_bot_with_captcha_error("")
+                return None
+                
+        except Exception as e:
+            error_str = str(e)
+            logger.warning(f"⚠️ CAPTCHA: Ошибка с моделью {current_model}: {error_str}")
+            
+            # Проверяем тип ошибки
+            is_404_error = '404' in error_str and 'NOT_FOUND' in error_str.upper()
+            is_resource_exhausted = 'RESOURCE_EXHAUSTED' in error_str.upper()
+            
+            if is_404_error or is_resource_exhausted:
+                logger.warning(f"⚠️ CAPTCHA: Модель {current_model} недоступна или лимит исчерпан")
+                
+                # Пробуем следующую модель
+                has_more_models = await rotate_captcha_model()
+                models_tried += 1
+                
+                # Если прошли полный цикл и вернулись к началу
+                if not has_more_models or (current_model_index == start_model_index and models_tried >= len(CAPTCHA_MODELS)):
+                    await stop_bot_with_captcha_error(
+                        f"Все модели исчерпаны. Последняя ошибка: {error_str}",
+                        is_limit_exhausted=True
+                    )
+                    return None
+                
+                # Продолжаем с следующей моделью
+                continue
+            else:
+                # Другие ошибки - критическая ситуация
+                logger.error(f"❌ CAPTCHA: Критическая ошибка с моделью {current_model}: {error_str}")
+                await stop_bot_with_captcha_error(
+                    f"Критическая ошибка с моделью {current_model}: {error_str}",
+                    is_limit_exhausted=False
+                )
+                return None
+    
+    # Если дошли сюда, значит все модели были перепробованы без успеха
+    await stop_bot_with_captcha_error(
+        "Все модели перепробованы, но ни одна не сработала",
+        is_limit_exhausted=True
+    )
+    return None
 
 # ----------------- keywords -----------------
 MENU_KEYWORDS = ["меню рыбалки", "уровень рыбака", "поймано рыбы", "уникальные виды"]
@@ -573,7 +781,7 @@ async def fisher_worker():
     last_click_time = None
     last_send_time = None
     consecutive_fails = 0
-    last_captcha_time = None  # Время последней капчи
+    last_captcha_time = None
 
     try:
         while not _stop_event.is_set():
@@ -588,7 +796,6 @@ async def fisher_worker():
             
             # Проверяем кулдаун
             if last_click_time and (now - last_click_time).total_seconds() < COOLDOWN_AFTER_CLICK:
-                # В режиме ожидания проверяем новые сообщения
                 try:
                     menu_msg = await asyncio.wait_for(
                         wait_for_bot_message(timeout=3.0),
@@ -597,7 +804,6 @@ async def fisher_worker():
                 except (asyncio.TimeoutError, Exception):
                     menu_msg = None
             else:
-                # Отправляем команду рыбалки
                 if last_send_time and (now - last_send_time).total_seconds() < MIN_SEND_INTERVAL:
                     await asyncio.sleep(0.3)
                     continue
@@ -611,7 +817,6 @@ async def fisher_worker():
                     fishing_in_progress = True
                     last_click_time = datetime.now(timezone.utc)
                     consecutive_fails = 0
-                    logger.info("🎣 Отправлена команда 'рыбалка'")
                 except Exception as e:
                     logger.warning(f"send_message failed: {e}")
                     consecutive_fails += 1
@@ -641,48 +846,45 @@ async def fisher_worker():
             if contains_any(txt, CAPTCHA_KEYWORDS):
                 logger.info("🔐 Обнаружена капча")
                 
-                # Запоминаем время капчи
                 last_captcha_time = datetime.now(timezone.utc)
                 
-                # Очищаем очередь сообщений перед решением капчи
                 while not bot_msg_queue.empty():
                     try:
                         bot_msg_queue.get_nowait()
                     except asyncio.QueueEmpty:
                         break
                 
-                success = await solve_captcha_message(menu_msg)
-                if success:
+                result = await solve_captcha_message(menu_msg)
+                
+                if result is None:
+                    # Критическая ошибка, бот уже остановлен
+                    return
+                elif result:
                     consecutive_fails = 0
-                    # После успешного решения капчи ждем новое сообщение
                     await asyncio.sleep(3.0)
                     
-                    # Очищаем очередь снова, чтобы избавиться от старых сообщений
                     while not bot_msg_queue.empty():
                         try:
                             bot_msg_queue.get_nowait()
                         except asyncio.QueueEmpty:
                             break
                     
-                    # Сбрасываем состояние, чтобы начать новую рыбалку
                     fishing_in_progress = False
                     last_click_time = None
                     
                     logger.info("✅ Капча решена, начинаем новую рыбалку")
                 else:
                     consecutive_fails += 1
-                    logger.warning("❌ Не удалось решить капчу")
+                    logger.warning("❌ Не удалось решить капчу (не критическая ошибка)")
                 
                 await asyncio.sleep(1)
                 continue
             
             # 2. Меню рыбалки (нужно нажать "рыбачить")
             if contains_any(txt, MENU_KEYWORDS):
-                logger.info("📋 Обнаружено меню рыбалки")
                 idx, btn_text = await find_button_index_with_keyword(menu_msg, "рыбач")
                 
                 if idx is None:
-                    # Ищем любую активную кнопку
                     for row in getattr(menu_msg, "buttons", []):
                         for i, b in enumerate(row):
                             txt_btn = getattr(b, "text", "") or ""
@@ -698,50 +900,36 @@ async def fisher_worker():
                         fishing_in_progress = True
                         last_click_time = datetime.now(timezone.utc)
                         consecutive_fails = 0
-                        logger.info("✅ Нажата кнопка 'рыбачить'")
                         
-                        # Ждем сообщение о закинутой удочке
                         await asyncio.sleep(2.0)
                         fish_wait_msg = await wait_for_bot_message(timeout=8.0)
                         if fish_wait_msg:
                             txt_fish = msg_text_lower(fish_wait_msg)
                             if contains_any(txt_fish, FISH_WAIT_KEYWORDS):
-                                logger.info("🎣 Удочка закинута, ждем рыбу...")
-                                # Ищем кнопку с рыбой
                                 found_msg, found_idx, found_text = await poll_for_button_emoji(timeout=30.0)
                                 if found_msg:
-                                    logger.info(f"🐟 Найдена кнопка с рыбой: {found_text}")
                                     fish_msg_id = found_msg.id
                                     
-                                    # Нажимаем на рыбу
                                     success_fish = await click_button_by_flat_index(found_msg, found_idx)
                                     if success_fish:
-                                        logger.info("✅ Нажата кнопка с рыбой")
                                         last_click_time = datetime.now(timezone.utc)
                                         
-                                        # Ждем результат рыбалки, отслеживая редактирование сообщения
                                         await asyncio.sleep(2.0)
                                         
                                         result_msg = await wait_for_fish_result(fish_msg_id, timeout=20.0)
                                         
-                                        if result_msg:
-                                            logger.info("🎣 Получен результат рыбалки")
-                                            
-                                            # Пытаемся нажать кнопку "рыбачить" после результата
+                                        if result_msg:                                            
                                             fish_button_success = await click_fish_button_after_result(result_msg, fish_msg_id)
                                             
                                             if fish_button_success:
                                                 fishing_in_progress = True
                                                 last_click_time = datetime.now(timezone.utc)
                                                 consecutive_fails = 0
-                                                logger.info("✅ Нажата кнопка 'рыбачить' после результата")
                                                 
-                                                # Короткая пауза перед продолжением
                                                 await asyncio.sleep(1.5)
                                                 continue
                                             else:
                                                 logger.warning("❌ Не удалось нажать 'рыбачить' после результата")
-                                                # Пробуем начать новую рыбалку через кулдаун
                                                 fishing_in_progress = False
                                                 consecutive_fails += 1
                                         else:
@@ -754,9 +942,10 @@ async def fisher_worker():
                                     logger.warning("❌ Кнопка с рыбой не найдена")
                                     consecutive_fails += 1
                             else:
-                                # Возможно, это капча
                                 if contains_any(txt_fish, CAPTCHA_KEYWORDS):
-                                    await solve_captcha_message(fish_wait_msg)
+                                    result = await solve_captcha_message(fish_wait_msg)
+                                    if result is None:
+                                        return
                                 consecutive_fails += 1
                         else:
                             consecutive_fails += 1
@@ -769,50 +958,36 @@ async def fisher_worker():
                 continue
             
             # 3. Ожидание поклевки (сообщение с FISH_WAIT_KEYWORDS)
-            if contains_any(txt, FISH_WAIT_KEYWORDS):
-                logger.info("🎣 Обнаружено ожидание поклевки")
-                
-                # Ищем кнопку с рыбой в текущем сообщении
+            if contains_any(txt, FISH_WAIT_KEYWORDS):                
                 idx, btn_text = await find_button_has_emoji(menu_msg)
                 if idx is not None:
                     found_msg, found_idx, found_text = menu_msg, idx, btn_text
                 else:
-                    # Ищем в истории
                     found_msg, found_idx, found_text = await poll_for_button_emoji(timeout=30.0)
                 
                 if found_msg and found_idx is not None:
-                    logger.info(f"🐟 Найдена кнопка с рыбой: {found_text}")
                     fish_msg_id = found_msg.id
                     
-                    # Нажимаем на рыбу
                     success_fish = await click_button_by_flat_index(found_msg, found_idx)
                     if success_fish:
-                        logger.info("✅ Нажата кнопка с рыбой")
                         last_click_time = datetime.now(timezone.utc)
                         
-                        # Ждем результат рыбалки, отслеживая редактирование сообщения
                         await asyncio.sleep(2.0)
                         
                         result_msg = await wait_for_fish_result(fish_msg_id, timeout=20.0)
                         
-                        if result_msg:
-                            logger.info("🎣 Получен результат рыбалки")
-                            
-                            # Пытаемся нажать кнопку "рыбачить" после результата
+                        if result_msg:                            
                             fish_button_success = await click_fish_button_after_result(result_msg, fish_msg_id)
                             
                             if fish_button_success:
                                 fishing_in_progress = True
                                 last_click_time = datetime.now(timezone.utc)
                                 consecutive_fails = 0
-                                logger.info("✅ Нажата кнопка 'рыбачить' после результата")
                                 
-                                # Короткая пауза перед продолжением
                                 await asyncio.sleep(1.5)
                                 continue
                             else:
                                 logger.warning("❌ Не удалось нажать 'рыбачить' после результата")
-                                # Пробуем начать новую рыбалку через кулдаун
                                 fishing_in_progress = False
                                 consecutive_fails += 1
                         else:
@@ -829,17 +1004,13 @@ async def fisher_worker():
                 continue
             
             # 4. Результат рыбалки (если мы пропустили предыдущие шаги)
-            if contains_any(txt, CATCH_SUCCESS_KEYWORDS):
-                logger.info("🎣 Обнаружен результат рыбалки")
-                
-                # Пытаемся нажать кнопку "рыбачить"
+            if contains_any(txt, CATCH_SUCCESS_KEYWORDS):                
                 fish_button_success = await click_fish_button_after_result(menu_msg)
                 
                 if fish_button_success:
                     fishing_in_progress = True
                     last_click_time = datetime.now(timezone.utc)
                     consecutive_fails = 0
-                    logger.info("✅ Нажата кнопка 'рыбачить' после результата")
                     await asyncio.sleep(1.5)
                     continue
                 else:
@@ -868,9 +1039,15 @@ CMD_START_PATTERN = r'(?i)^(' + '|'.join(re.escape(cmd) for cmd in CMD_START) + 
 @client.on(events.NewMessage(outgoing=True, chats=QALAIS_BOT_ID, pattern=CMD_START_PATTERN))
 async def cmd_start(event):
     global _worker_task, _worker_running, _stop_event, bot_msg_queue
+    global last_captcha_error_type, captcha_error_count
+    
     if _worker_running:
         await event.reply("Бот уже запущен.")
         return
+    
+    # Сбрасываем счетчики ошибок капчи при запуске
+    last_captcha_error_type = None
+    captcha_error_count = 0
     
     # Очищаем очередь сообщений перед запуском
     while not bot_msg_queue.empty():
@@ -898,18 +1075,15 @@ async def cmd_stop_listener(event):
         _stop_event.set()
         
         if _worker_task:
-            # Даем воркеру время завершиться корректно
             try:
                 await asyncio.wait_for(_worker_task, timeout=5.0)
             except (asyncio.CancelledError, asyncio.TimeoutError):
-                # Если не завершился за 5 сек, отменяем
                 _worker_task.cancel()
                 try:
                     await _worker_task
                 except asyncio.CancelledError:
                     pass
         
-        # Очищаем очередь сообщений после остановки
         while not bot_msg_queue.empty():
             try:
                 bot_msg_queue.get_nowait()
@@ -923,7 +1097,10 @@ async def cmd_stop_listener(event):
 async def main():
     logger.info("Connecting to Telegram...")
     
-    # Несколько попыток подключения
+    # Логируем информацию о моделях капчи
+    logger.info(f"🤖 Доступные модели капчи: {', '.join(CAPTCHA_MODELS)}")
+    logger.info(f"🔧 Начинаем с модели: {CAPTCHA_MODELS[current_model_index]}")
+    
     for attempt in range(1, 6):
         try:
             await client.start()
@@ -937,7 +1114,6 @@ async def main():
                 logger.error("❌ Не удалось подключиться к Telegram после 5 попыток")
                 return
     
-    # Запускаем задачу самопингования
     if RENDER_APP_URL:
         asyncio.create_task(self_ping())
         logger.info("🔄 Самопинг запущен")
@@ -946,7 +1122,6 @@ async def main():
 
     logger.info("🤖 Бот запущен. Отправьте 'начать' в личном чате с игровым ботом.")
     
-    # Очищаем очередь при старте
     while not bot_msg_queue.empty():
         try:
             bot_msg_queue.get_nowait()
@@ -956,7 +1131,6 @@ async def main():
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    # Запускаем веб-сервер Flask в отдельном потоке
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
     logger.info("🌐 Веб-сервер запущен")
