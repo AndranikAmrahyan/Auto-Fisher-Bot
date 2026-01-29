@@ -632,7 +632,7 @@ async def solve_captcha_message(message) -> Optional[bool]:
                         prompt
                     ]
                 ),
-                timeout=15.0
+                timeout=60.0
             )
             
             predicted_emoji = response.text.strip()
@@ -649,7 +649,7 @@ async def solve_captcha_message(message) -> Optional[bool]:
                 try:
                     await asyncio.wait_for(
                         message.click(best_idx),
-                        timeout=5.0
+                        timeout=10.0
                     )
                     logger.info(f"✅ Капча решена успешно с моделью {current_model}")
                     
@@ -713,6 +713,13 @@ async def solve_captcha_message(message) -> Optional[bool]:
                 await stop_bot_with_captcha_error("")
                 return None
                 
+        except asyncio.TimeoutError:
+            logger.error(f"❌ CAPTCHA: Тайм-аут ожидания ответа от {current_model}")
+            await stop_bot_with_captcha_error(
+                f"Тайм-аут ожидания ответа от {current_model}",
+                is_limit_exhausted=False
+            )
+            return None
         except Exception as e:
             error_str = str(e)
             logger.warning(f"⚠️ CAPTCHA: Ошибка с моделью {current_model}: {error_str}")
