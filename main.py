@@ -16,6 +16,10 @@ from PIL import Image
 import aiohttp
 from flask import Flask
 
+# === ВРЕМЕННОЕ ===
+from event_bot import init_event_bot
+# ===========================
+
 # Google GenAI (новая версия)
 from google import genai
 from google.genai import types
@@ -1119,6 +1123,13 @@ async def main():
             else:
                 logger.error("❌ Не удалось подключиться к Telegram после 5 попыток")
                 return
+    
+    # === ВРЕМЕННОЕ ===
+    try:
+        init_event_bot(client)
+    except Exception as e:
+        logger.error(f"❌ Не удалось загрузить Event Bot: {e}")
+    # ==========================
     
     if RENDER_APP_URL:
         asyncio.create_task(self_ping())
