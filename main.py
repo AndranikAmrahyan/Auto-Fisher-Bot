@@ -5,6 +5,7 @@ import time
 import asyncio
 import logging
 import threading
+import io
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -572,18 +573,43 @@ async def solve_captcha_message(message) -> Optional[bool]:
     if not unique_options:
         logger.error("CAPTCHA: Кнопки не найдены.")
         return False
-
-    tmp = "captcha_tmp.jpg"
     
-    # Загружаем изображение капчи
+    logger.info(f"Кнопки капчи: {unique_options}")
+
+    # Загружаем изображение капчи в память
+    image_data = None
     try:
-        await asyncio.wait_for(
-            client.download_media(message.media, file=tmp),
-            timeout=10.0
+        # Скачиваем в bytes
+        raw_img = await asyncio.wait_for(
+            message.download_media(file=bytes),
+            timeout=15.0
         )
         
-        with open(tmp, "rb") as f:
-            image_data = f.read()
+        # === ОБРАБОТКА ИЗОБРАЖЕНИЯ (CROP) ===
+        # Используем PIL для обрезки правой части (текст "ПРОВЕРКА НА РОБОТА...")
+        try:
+            with Image.open(io.BytesIO(raw_img)) as img:
+                width, height = img.size
+                # Отрезаем ~35% справа, оставляем левые 65%
+                # Текст находится справа, а нужный объект слева/по центру
+                crop_width = int(width * 0.65)
+                
+                # Обрезаем: (left, top, right, bottom)
+                cropped_img = img.crop((0, 0, crop_width, height))
+                
+                # Сохраняем обработанное изображение в буфер
+                output_buffer = io.BytesIO()
+                # Конвертируем в RGB если нужно (для PNG с прозрачностью иногда полезно, но для фото JPEG ок)
+                if img.mode in ("RGBA", "P"):
+                    cropped_img = cropped_img.convert("RGB")
+                    
+                cropped_img.save(output_buffer, format="JPEG")
+                image_data = output_buffer.getvalue()
+                # logger.info("✂️ Изображение капчи обрезано (удален текст справа)")
+        except Exception as pil_err:
+            logger.warning(f"⚠️ Ошибка обработки изображения PIL, используем оригинал: {pil_err}")
+            image_data = raw_img
+
     except Exception as e:
         logger.warning(f"CAPTCHA: Ошибка загрузки изображения: {e}")
         # Проверяем, была ли такая же ошибка в прошлый раз
@@ -611,10 +637,14 @@ async def solve_captcha_message(message) -> Optional[bool]:
             captcha_error_count = 1
         return False
     
+    # === УЛУЧШЕННЫЙ ПРОМПТ ===
     prompt = (
-        f"Look at the object in this image. "
-        f"Select the most appropriate emoji from this list: {unique_options}. "
-        f"Return only the emoji character itself."
+        f"This is a captcha check. The image contains one MAIN object which is significantly LARGER than the others. "
+        f"There are also small decoy icons and chaotic lines - IGNORE them. "
+        f"Look strictly for the single BIGGEST visual element in the image. "
+        f"Compare this biggest object with the following emoji options: {', '.join(unique_options)}. "
+        f"Reply with ONLY the single emoji character from the list that matches the biggest object. "
+        f"Do not write explanations."
     )
     
     # Сохраняем начальный индекс для проверки полного цикла
@@ -639,17 +669,42 @@ async def solve_captcha_message(message) -> Optional[bool]:
                 timeout=60.0
             )
             
-            predicted_emoji = response.text.strip()
-            logger.info(f"✅ CAPTCHA: Ответ API: '{predicted_emoji}'")
+            raw_answer = response.text.strip()
+            logger.info(f"✅ CAPTCHA: Ответ API: '{raw_answer}'")
+            
+            # === УМНЫЙ ПАРСИНГ ОТВЕТА ===
+            # ИИ может вернуть "The answer is ⚔", поэтому ищем эмодзи внутри текста
+            predicted_emoji = None
+            
+            # 1. Точное совпадение
+            if raw_answer in unique_options:
+                predicted_emoji = raw_answer
+            
+            # 2. Поиск эмодзи внутри текста
+            if not predicted_emoji:
+                # Собираем все варианты из unique_options, которые ИИ упомянул в своем ответе
+                found_options = [opt for opt in unique_options if opt in raw_answer]
+            
+                if len(found_options) == 1:
+                    # Если найден ровно один вариант — это наш выбор
+                    predicted_emoji = found_options[0]
+                elif len(found_options) > 1:
+                    # Если ИИ упомянул больше одного варианта из доступных кнопок
+                    logger.error(f"❌ CAPTCHA: ИИ выдал неоднозначный ответ (найдено несколько эмодзи из возможных вариантов: {found_options})")
+                    
+                    await stop_bot_with_captcha_error("Ошибка интерпретации: В ответе ИИ найдено несколько эмодзи из возможных вариантов")
+                    return None
+                # Если len(found_options) == 0, predicted_emoji останется None, и сработает логика ниже
             
             best_idx = -1
-            for i, btn_txt in enumerate(flat_buttons):
-                if predicted_emoji in btn_txt:
-                    best_idx = i
-                    break
+            if predicted_emoji:
+                for i, btn_txt in enumerate(flat_buttons):
+                    if predicted_emoji == btn_txt: # Ищем точное совпадение кнопки
+                        best_idx = i
+                        break
             
             if best_idx != -1:
-                logger.info(f"🎯 CAPTCHA: Нажимаем кнопку {best_idx}")
+                logger.info(f"🎯 CAPTCHA: Нажимаем кнопку {best_idx} ({predicted_emoji})")
                 try:
                     await asyncio.wait_for(
                         message.click(best_idx),
@@ -698,11 +753,11 @@ async def solve_captcha_message(message) -> Optional[bool]:
                         captcha_error_count = 1
                     return False
             else:
-                logger.error("❌ CAPTCHA: Соответствующая кнопка не найдена в ответе API")
+                logger.error(f"❌ CAPTCHA: Соответствующая кнопка не найдена в ответе API")
                 
                 # Отправляем сообщение пользователю о необходимости решить капчу вручную
                 error_message = (
-                    "❌ Не удалось решить капчу автоматически.\n\n"
+                    "❌ Не удалось решить капчу автоматически (Соответствующая кнопка не найдена в ответе API).\n\n"
                     "Пожалуйста, решите капчу вручную и снова запустите авто рыбалку.\n"
                     "Если это случается часто, свяжитесь со службой поддержки.\n"
                     f"Поддержка: {SUPPORT_CONTACT}\n\n"
