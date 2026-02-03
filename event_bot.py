@@ -95,9 +95,22 @@ def generate_report(is_final=False):
     if sorted_users:
         users_text += "\n\n🏆 <b>Лидерборд:</b>\n"
         for idx, (uid, data) in enumerate(sorted_users, 1):
+            # Сбор детальной статистики по словам для пользователя
+            user_details = []
+            for w in SECRET_WORDS:
+                w_lower = w.lower()
+                # Получаем сколько раз этот uid сказал слово w
+                count = state.user_word_stats.get(w_lower, {}).get(uid, 0)
+                if count > 0:
+                    user_details.append(f"{w} - {count}")
+            
+            details_str = ""
+            if user_details:
+                details_str = f" ({', '.join(user_details)})"
+
             # Ссылка на профиль tg://user?id=...
             name_link = f"<a href='tg://user?id={uid}'>{data['name']}</a>"
-            users_text += f"{idx}. {name_link} — <b>{data['count']}</b>\n"
+            users_text += f"{idx}. {name_link} — <b>{data['count']}</b>{details_str}\n"
     else:
         users_text += "\n\n💤 Пока никто ничего не угадал."
 
@@ -151,13 +164,20 @@ def init_event_bot(client: TelegramClient):
     """Подключает хендлеры ивента к существующему клиенту."""
     logger.info("🎮 Event Bot module loaded")
 
-    @client.on(events.NewMessage(chats=ADMIN_IDS))
+    @client.on(events.NewMessage(chats=ADMIN_IDS + [TARGET_GROUP_ID]))
     async def admin_commands_handler(event):
         sender_id = event.sender_id
+        
+        if sender_id not in ADMIN_IDS:
+            return
+
         text = event.raw_text.lower().strip()
         
         # --- КОМАНДА СТАРТ ---
         if text == CMD_START_EVENT:
+            if event.chat_id == TARGET_GROUP_ID:
+                return
+
             if state.is_running:
                 await event.reply("⚠️ Ивент уже запущен!")
                 return
