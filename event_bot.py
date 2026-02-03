@@ -2,6 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from telethon import events, TelegramClient
+from telethon.errors import MessageNotModifiedError
 
 # ================= КОНФИГУРАЦИЯ =================
 
@@ -41,6 +42,9 @@ class EventState:
         self.initiator_id = None  # Кто запустил (админ)
         self.status_msg = None    # Объект сообщения в ЛС админа для редактирования
         
+        # Запоминаем последний текст, чтобы не спамить API ошибками
+        self.last_check_text = None 
+        
         # Данные статистики
         # scores: {user_id: {"name": str, "count": int}}
         self.scores = {}
@@ -60,6 +64,7 @@ class EventState:
         self.start_time = datetime.now(timezone.utc)
         self.initiator_id = initiator_id
         self.status_msg = None
+        self.last_check_text = None # Сброс кэша текста
         self.scores = {}
         self.word_stats = {w.lower(): 0 for w in SECRET_WORDS}
         self.user_word_stats = {w.lower(): {} for w in SECRET_WORDS}
@@ -139,12 +144,24 @@ async def ui_updater_loop(client: TelegramClient):
     logger.info("UI Updater Loop started")
     while state.is_running:
         try:
+            # Проверяем state.status_msg на случай, если сообщение удалили вручную
             if state.needs_update and state.status_msg:
                 text = generate_report(is_final=False)
-                # Проверяем, отличается ли текст, чтобы не дергать API зря
-                if state.status_msg.text != text.replace("<b>", "**").replace("</b>", "**"):
+                
+                # Сравниваем с последним успешно отправленным текстом (в памяти),
+                # а не с тем, что возвращает API (там могут быть отличия в разметке).
+                if text == state.last_check_text:
+                    # Текст идентичен, обновление не требуется
+                    state.needs_update = False
+                else:
                     try:
                         await state.status_msg.edit(text, parse_mode='html')
+                        state.last_check_text = text # Запоминаем успешный текст
+                        state.needs_update = False
+                    except MessageNotModifiedError:
+                        # Telegram говорит, что ничего не поменялось. 
+                        # Синхронизируем наше состояние и игнорируем ошибку.
+                        state.last_check_text = text
                         state.needs_update = False
                     except Exception as e:
                         logger.warning(f"UI Update error: {e}")
@@ -184,6 +201,10 @@ def init_event_bot(client: TelegramClient):
             state.reset(sender_id)
             report = generate_report(is_final=False)
             state.status_msg = await client.send_message(sender_id, report, parse_mode='html')
+            
+            # Инициализируем кэш текста сразу же, чтобы цикл не пытался редактировать 
+            # только что отправленное сообщение
+            state.last_check_text = report
             
             # Запускаем фоновый цикл обновления UI
             state.ui_task = asyncio.create_task(ui_updater_loop(client))
