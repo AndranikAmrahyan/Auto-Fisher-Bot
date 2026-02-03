@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone
 from telethon import events, TelegramClient
 from telethon.errors import MessageNotModifiedError
+import re # Добавляем для (на будущее), но пока используем встроенный count с корнями
 
 # ================= КОНФИГУРАЦИЯ =================
 
@@ -12,7 +13,16 @@ from telethon.errors import MessageNotModifiedError
 EVENT_MODE = 2
 
 # 2. Загаданные слова (массив строк)
-SECRET_WORDS = ["рыба", "удочка", "клев"]
+SECRET_WORDS = ["WW", "Завоз", "Фармить", "Крока", "Эксайл", "Нфт"]
+
+# Словарь корней для поиска форм слова (учет падежей/спряжений)
+# Если слова нет в этом списке, поиск будет идти по самому слову.
+WORD_ROOTS = {
+    "фармить": "фарм",   # найдет: фармлю, фармил, нафармил, фарма
+    "крока": "крок",     # найдет: крок, кроку, кроком, кроки
+    # "завоз", "эксайл", "нфт", "ww" — их основы совпадают с началом слова, 
+    # поэтому они найдутся автоматически (завоз -> завоза, нфт -> нфтшка)
+}
 
 # 3. Команды управления
 CMD_START_EVENT = "старт ивент"
@@ -304,7 +314,10 @@ def init_event_bot(client: TelegramClient):
             # Точное совпадение
             for secret in SECRET_WORDS:
                 s_lower = secret.lower()
-                if msg_text == s_lower:
+                # Если режим точного совпадения, проверяем и само слово, и его корень
+                # (хотя точное совпадение с корнем редко имеет смысл, но для совместимости оставим)
+                search_term = WORD_ROOTS.get(s_lower, s_lower)
+                if msg_text == s_lower or msg_text == search_term:
                     found_matches += 1
                     state.word_stats[s_lower] += 1
                     state.user_word_stats[s_lower][user_id] = state.user_word_stats[s_lower].get(user_id, 0) + 1
@@ -313,7 +326,12 @@ def init_event_bot(client: TelegramClient):
             # Вхождение (для бота-транскрибатора это основной вариант, так как там много текста)
             for secret in SECRET_WORDS:
                 s_lower = secret.lower()
-                count_in_msg = msg_text.count(s_lower)
+                
+                # Получаем корень слова для поиска (чтобы найти "фармлю" через "фарм")
+                search_term = WORD_ROOTS.get(s_lower, s_lower)
+                
+                # Ищем количество вхождений корня или слова
+                count_in_msg = msg_text.count(search_term)
                 
                 if count_in_msg > 0:
                     found_matches += count_in_msg
